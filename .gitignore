@@ -131,9 +131,9 @@ node_modules/
 
 # Modmail
 config.json
-plugins/
-!plugins/registry.json
 temp/
 test.py
 stack.yml
 .github/workflows/build_docker.yml
+*.db
+*.sqlite

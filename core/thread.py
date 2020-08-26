@@ -91,25 +91,33 @@ class Thread:
         if category is not None:
             overwrites = None
 
-        try:
-            channel = await self.bot.modmail_guild.create_text_channel(
-                name=format_channel_name(recipient, self.bot.modmail_guild),
-                category=category,
-                overwrites=overwrites,
-                reason="Creating a thread channel.",
-            )
-        except discord.HTTPException as e:  # Failed to create due to missing perms.
-            logger.critical("An error occurred while creating a thread.", exc_info=True)
-            self.manager.cache.pop(self.id)
+        name = format_channel_name(recipient, self.bot.modmail_guild)
+        channel = None
 
-            embed = discord.Embed(color=self.bot.error_color)
-            embed.title = "Error while trying to create a thread."
-            embed.description = str(e)
-            embed.add_field(name="Recipient", value=recipient.mention)
+        for _ in range(2):
+            try:
+                channel = await self.bot.modmail_guild.create_text_channel(
+                    name=name,
+                    category=category,
+                    overwrites=overwrites,
+                    reason="Creating a thread channel.",
+                )
+                break
+            except discord.HTTPException as e:  # Failed to create due to missing perms.
+                logger.critical("An error occurred while creating a thread.", exc_info=True)
+                if "Contains words not allowed" in str(e):
+                    name = f"user_{recipient.id}"
+                    continue
+                self.manager.cache.pop(self.id)
 
-            if self.bot.log_channel is not None:
-                await self.bot.log_channel.send(embed=embed)
-            return
+                embed = discord.Embed(color=self.bot.error_color)
+                embed.title = "Error while trying to create a thread."
+                embed.description = str(e)
+                embed.add_field(name="Recipient", value=recipient.mention)
+
+                if self.bot.log_channel is not None:
+                    await self.bot.log_channel.send(embed=embed)
+                return
 
         self._channel = channel
 
@@ -125,7 +133,7 @@ class Thread:
             log_url = log_count = None
             # ensure core functionality still works
 
-        await channel.edit(topic=f"User ID: {recipient.id}")
+        await channel.edit(topic=f"User ID: {recipient.id}\nBot ID: {self.bot.user.id}")
         self.ready = True
 
         if creator:
@@ -311,20 +319,8 @@ class Thread:
         self.bot.config["notification_squad"].pop(str(self.id), None)
 
         # Logging
-        log_data = await self.bot.api.post_log(
-            self.channel.id,
-            {
-                "open": False,
-                "closed_at": str(datetime.utcnow()),
-                "close_message": message if not silent else None,
-                "closer": {
-                    "id": str(closer.id),
-                    "name": closer.name,
-                    "discriminator": closer.discriminator,
-                    "avatar_url": str(closer.avatar_url),
-                    "mod": True,
-                },
-            },
+        log_data = await self.bot.api.close_log(
+            self.channel.id, message if not silent else None, closer
         )
 
         if isinstance(log_data, dict):
@@ -333,8 +329,9 @@ class Thread:
                 prefix = ""
             log_url = f"{self.bot.config['log_url'].strip('/')}{'/' + prefix if prefix else ''}/{log_data['key']}"
 
-            if log_data["messages"]:
-                content = str(log_data["messages"][0]["content"])
+            peak_message = await self.bot.api.get_log_messages(channel_id=self.channel.id, limit=1)
+            if peak_message:
+                content = str(peak_message[0]["content"])
                 sneak_peak = content.replace("\n", "")
             else:
                 sneak_peak = "No content"
@@ -551,15 +548,16 @@ class Thread:
     async def delete_message(
         self, message: typing.Union[int, discord.Message] = None, note: bool = True
     ) -> None:
+        tasks = []
         if isinstance(message, discord.Message):
             message1, message2 = await self.find_linked_messages(message1=message, note=note)
+            tasks += [self.bot.api.delete_message(message1.id)]
+            if message2 is not None:
+                tasks += [message2.delete()]
         else:
             message1, message2 = await self.find_linked_messages(message, note=note)
-        tasks = []
-        if not isinstance(message, discord.Message):
-            tasks += [message1.delete()]
-        if message2 is not None:
-            tasks += [message2.delete()]
+            tasks += [message1.delete(), self.bot.api.delete_message(message1.id)]
+
         if tasks:
             await asyncio.gather(*tasks)
 
@@ -904,7 +902,7 @@ class ThreadManager:
                 )
                 if thread is not None:
                     logger.debug("Found thread with tempered ID.")
-                    await channel.edit(topic=f"User ID: {user_id}")
+                    await channel.edit(topic=f"User ID: {user_id}\nBot ID: {self.bot.user.id}")
             return thread
 
         if recipient:
@@ -923,7 +921,8 @@ class ThreadManager:
                 thread = None
         else:
             channel = discord.utils.get(
-                self.bot.modmail_guild.text_channels, topic=f"User ID: {recipient_id}"
+                self.bot.modmail_guild.text_channels,
+                topic=f"User ID: {recipient_id}\nBot ID: {self.bot.user.id}",
             )
             if channel:
                 thread = Thread(self, recipient or recipient_id, channel)
@@ -941,7 +940,7 @@ class ThreadManager:
         user_id = -1
 
         if channel.topic:
-            user_id = match_user_id(channel.topic)
+            user_id = match_user_id(self.bot, channel.topic)
 
         if user_id == -1:
             return None
@@ -997,7 +996,7 @@ class ThreadManager:
                 self.bot.config.set("fallback_category_id", category.id)
                 await self.bot.config.update()
 
-        self.bot.loop.create_task(thread.setup(creator=creator, category=category))
+        await thread.setup(creator=creator, category=category)
         return thread
 
     async def find_or_create(self, recipient) -> Thread:

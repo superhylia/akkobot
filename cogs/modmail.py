@@ -9,7 +9,6 @@ import discord
 from discord.ext import commands
 from discord.utils import escape_markdown
 
-from dateutil import parser
 from natural.date import duration
 
 from core import checks
@@ -577,46 +576,56 @@ class Modmail(commands.Cog):
         log_link = await self.bot.api.get_log_link(ctx.channel.id)
         await ctx.send(embed=discord.Embed(color=self.bot.main_color, description=log_link))
 
-    def format_log_embeds(self, logs, avatar_url):
+    async def format_log_embeds(self, logs, avatar_url):
         embeds = []
         logs = tuple(logs)
         title = f"Total Results Found ({len(logs)})"
 
         for entry in logs:
-            created_at = parser.parse(entry["created_at"])
-
+            created_at = entry["created_at"]
+            creator = await self.bot.api.get_log_creator(log_key=entry["key"])
+            recipient = await self.bot.api.get_log_recipient(log_key=entry["key"])
+            messages = await self.bot.api.get_log_messages(
+                log_key=entry["key"], limit=3, filter_types=["anonymous", "thread_message"]
+            )
             prefix = self.bot.config["log_url_prefix"].strip("/")
             if prefix == "NONE":
                 prefix = ""
             log_url = f"{self.bot.config['log_url'].strip('/')}{'/' + prefix if prefix else ''}/{entry['key']}"
 
-            username = entry["recipient"]["name"] + "#"
-            username += entry["recipient"]["discriminator"]
+            username = recipient["name"] + "#"
+            username += recipient["discriminator"]
 
             embed = discord.Embed(color=self.bot.main_color, timestamp=created_at)
             embed.set_author(name=f"{title} - {username}", icon_url=avatar_url, url=log_url)
             embed.url = log_url
             embed.add_field(name="Created", value=duration(created_at, now=datetime.utcnow()))
-            closer = entry.get("closer")
-            if closer is None:
-                closer_msg = "Unknown"
+
+            if entry["open"]:
+                embed.add_field(name="Status", value="`OPEN`")
             else:
-                closer_msg = f"<@{closer['id']}>"
-            embed.add_field(name="Closed By", value=closer_msg)
+                closer = await self.bot.api.get_log_closer(log_key=entry["key"])
+                if closer is None:
+                    closer_msg = "Unknown"
+                else:
+                    closer_msg = f"<@{closer['id']}>"
 
-            if entry["recipient"]["id"] != entry["creator"]["id"]:
-                embed.add_field(name="Created by", value=f"<@{entry['creator']['id']}>")
+                embed.add_field(name="Closed By", value=closer_msg)
 
-            embed.add_field(name="Preview", value=format_preview(entry["messages"]), inline=False)
+            if recipient["id"] != creator["id"]:
+                embed.add_field(name="Created by", value=f"<@{creator['id']}>")
 
-            if closer is not None:
-                # BUG: Currently, logviewer can't display logs without a closer.
-                embed.add_field(name="Link", value=log_url)
-            else:
-                logger.debug("Invalid log entry: no closer.")
-                embed.add_field(name="Log Key", value=f"`{entry['key']}`")
+            preview = ""
+            for message in messages:
+                author = await self.bot.api.get_message_author(message["id"])
+                content = str(message["content"]).replace("\n", " ")
+                name = author["name"] + "#" + str(author["discriminator"])
+                prefix = "[M]" if message["author_mod"] else "[R]"
+                preview += truncate(f"`{prefix} {name}:` {content}", max=75) + "\n"
 
-            embed.set_footer(text="Recipient ID: " + str(entry["recipient"]["id"]))
+            embed.add_field(name="Preview", value=preview or "No Messages", inline=False)
+            embed.add_field(name="Link", value=log_url)
+            embed.set_footer(text="Recipient ID: " + str(recipient["id"]))
             embeds.append(embed)
         return embeds
 
@@ -653,7 +662,7 @@ class Modmail(commands.Cog):
 
         logs = reversed([log for log in logs if not log["open"]])
 
-        embeds = self.format_log_embeds(logs, avatar_url=icon_url)
+        embeds = await self.format_log_embeds(logs, avatar_url=icon_url)
 
         session = EmbedPaginatorSession(ctx, *embeds)
         await session.run()
@@ -670,7 +679,7 @@ class Modmail(commands.Cog):
         user = user if user is not None else ctx.author
 
         entries = await self.bot.api.search_closed_by(user.id)
-        embeds = self.format_log_embeds(entries, avatar_url=self.bot.guild.icon_url)
+        embeds = await self.format_log_embeds(entries, avatar_url=self.bot.guild.icon_url)
 
         if not embeds:
             embed = discord.Embed(
@@ -692,24 +701,24 @@ class Modmail(commands.Cog):
 
         success = await self.bot.api.delete_log_entry(key)
 
-        if not success:
-            embed = discord.Embed(
-                title="Error",
-                description=f"Log entry `{key}` not found.",
-                color=self.bot.error_color,
-            )
-        else:
+        if success:
             embed = discord.Embed(
                 title="Success",
                 description=f"Log entry `{key}` successfully deleted.",
                 color=self.bot.main_color,
+            )
+        else:
+            embed = discord.Embed(
+                title="Error",
+                description=f"Log entry `{key}` not found.",
+                color=self.bot.error_color,
             )
 
         await ctx.send(embed=embed)
 
     @logs.command(name="responded")
     @checks.has_permissions(PermissionLevel.SUPPORTER)
-    async def logs_responded(self, ctx, *, user: User = None):
+    async def logs_responded(self, ctx, limit: Optional[int] = 0, *, user: User = None):
         """
         Get all logs where the specified user has responded at least once.
 
@@ -718,9 +727,9 @@ class Modmail(commands.Cog):
         """
         user = user if user is not None else ctx.author
 
-        entries = await self.bot.api.get_responded_logs(user.id)
+        entries = await self.bot.api.search_by_responded(user.id, limit)
 
-        embeds = self.format_log_embeds(entries, avatar_url=self.bot.guild.icon_url)
+        embeds = await self.format_log_embeds(entries, avatar_url=self.bot.guild.icon_url)
 
         if not embeds:
             embed = discord.Embed(
@@ -734,7 +743,7 @@ class Modmail(commands.Cog):
 
     @logs.command(name="search", aliases=["find"])
     @checks.has_permissions(PermissionLevel.SUPPORTER)
-    async def logs_search(self, ctx, limit: Optional[int] = None, *, query):
+    async def logs_search(self, ctx, limit: Optional[int] = 0, *, query):
         """
         Retrieve all logs that contain messages with your query.
 
@@ -745,7 +754,7 @@ class Modmail(commands.Cog):
 
         entries = await self.bot.api.search_by_text(query, limit)
 
-        embeds = self.format_log_embeds(entries, avatar_url=self.bot.guild.icon_url)
+        embeds = await self.format_log_embeds(entries, avatar_url=self.bot.guild.icon_url)
 
         if not embeds:
             embed = discord.Embed(
@@ -1160,10 +1169,12 @@ class Modmail(commands.Cog):
         sent_emoji, blocked_emoji = await self.bot.retrieve_emoji()
 
         if ctx.thread:
-            user_id = match_user_id(ctx.channel.topic)
+            user_id = match_user_id(self.bot, ctx.channel.topic)
             if user_id == -1:
                 logger.info("Setting current channel's topic to User ID.")
-                await ctx.channel.edit(topic=f"User ID: {ctx.thread.id}")
+                await ctx.channel.edit(
+                    topic=f"User ID: {ctx.thread.id}\nBot ID: {self.bot.user.id}"
+                )
             return await self.bot.add_reaction(ctx.message, sent_emoji)
 
         logger.info("Attempting to fix a broken thread %s.", ctx.channel.name)
@@ -1175,7 +1186,10 @@ class Modmail(commands.Cog):
         )
         if thread is not None:
             logger.debug("Found thread with tempered ID.")
-            await ctx.channel.edit(reason="Fix broken Modmail thread", topic=f"User ID: {user_id}")
+            await ctx.channel.edit(
+                reason="Fix broken Modmail thread",
+                topic=f"User ID: {user_id}\nBot ID: {self.bot.user.id}",
+            )
             return await self.bot.add_reaction(ctx.message, sent_emoji)
 
         # find genesis message to retrieve User ID
@@ -1187,7 +1201,9 @@ class Modmail(commands.Cog):
                 and message.embeds[0].color.value == self.bot.main_color
                 and message.embeds[0].footer.text
             ):
-                user_id = match_user_id(message.embeds[0].footer.text)
+                user_id = match_user_id(
+                    self.bot, message.embeds[0].footer.text, match_bot_id=False
+                )
                 if user_id != -1:
                     recipient = self.bot.get_user(user_id)
                     if recipient is None:
@@ -1203,7 +1219,8 @@ class Modmail(commands.Cog):
                         "Setting current channel's topic to User ID and created new thread."
                     )
                     await ctx.channel.edit(
-                        reason="Fix broken Modmail thread", topic=f"User ID: {user_id}"
+                        reason="Fix broken Modmail thread",
+                        topic=f"User ID: {user_id}\nBot ID: {self.bot.user.id}",
                     )
                     return await self.bot.add_reaction(ctx.message, sent_emoji)
 
@@ -1254,7 +1271,9 @@ class Modmail(commands.Cog):
                 thread.ready = True
                 logger.info("Setting current channel's topic to User ID and created new thread.")
                 await ctx.channel.edit(
-                    reason="Fix broken Modmail thread", name=name, topic=f"User ID: {user.id}"
+                    reason="Fix broken Modmail thread",
+                    name=name,
+                    topic=f"User ID: {user.id}\nBot ID: {self.bot.user.id}",
                 )
                 return await self.bot.add_reaction(ctx.message, sent_emoji)
 

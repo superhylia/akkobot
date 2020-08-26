@@ -7,6 +7,37 @@ This project mostly adheres to [Semantic Versioning](https://semver.org/spec/v2.
 however, insignificant breaking changes do not guarantee a major version bump, see the reasoning [here](https://github.com/kyb3r/modmail/issues/319). If you're a plugins developer, note the "BREAKING" section.
 
 
+# v3.5.1-dev1
+
+DONT UPDATE TO THIS VERSION YET UNLESS YOU KNOW WHAT YOU'RE DOING.
+
+IRREVERSIBLE DATABASE CHANGES FOR MONGODB.
+
+### Added
+
+- Support for SQL databases: sqlite, postgresql, mysql (all need tests).
+- Uses ORM/ODM for the database models.
+- `PluginClient`, how plugin should interact with the database. Implements `.get` and `.set` methods. Support all serializable values.
+  - To obtain a `PluginClient`, use `await bot.api.get_plugin_client(cog)`
+- Fixed thread channels not creating when username is not allowed for server discovery.
+  - Channel name would be replaced by `#user_<userid>`.
+- Bot ID is stored in channel topic as well, to allow multiple modmail bots in one server without conflict.
+
+### Changed
+
+- A reworked interface for MongoDB database format, removed lists and embed types in favour of separate collections (need tests).
+  - To improve the success of migration, it's recommended for your MongoDB user to have Atlas Admin perms.
+    - If your migration fails due to timeout (happens without admin), you can set `FORCE_MIGRATE=TRUE` in the envs.
+  - This increase compatibility with SQL database types.
+- Removed `bot.plugin_db.get_partition`, to get a database client use (async) `bot.api.get_plugin_client`.
+  - All existing plugins using the old api needs to be updated. Plugins that required a database partition will break after this update.
+- Lots of changes in api methods.
+- User models in database are updated.
+  - Whenever their name/discriminator/avatar_url is changed, all the user references are updated as well.
+- Removed `DATABASE_TYPE` config from previous update, the database type is inferred from the `CONNECTION_URI` now.
+- Respect the default database parameter.
+  - Check your current `CONNECTION_URI`/`MONGO_URI`, if it specifies a database at the end, Modmail will now respect that. To return to the old database change the database to "modmail_bot": `mongodb+srv://[...].mongodb.net/modmail_bot`.
+
 # v3.5.0
 
 Fixed discord.py issue.

@@ -15,7 +15,6 @@ __all__ = [
     "strtobool",
     "User",
     "truncate",
-    "format_preview",
     "is_image_url",
     "parse_image_url",
     "human_join",
@@ -87,34 +86,6 @@ def truncate(text: str, max: int = 50) -> str:  # pylint: disable=redefined-buil
     """
     text = text.strip()
     return text[: max - 3].strip() + "..." if len(text) > max else text
-
-
-def format_preview(messages: typing.List[typing.Dict[str, typing.Any]]):
-    """
-    Used to format previews.
-
-    Parameters
-    ----------
-    messages : List[Dict[str, Any]]
-        A list of messages.
-
-    Returns
-    -------
-    str
-        A formatted string preview.
-    """
-    messages = messages[:3]
-    out = ""
-    for message in messages:
-        if message.get("type") in {"note", "internal"}:
-            continue
-        author = message["author"]
-        content = str(message["content"]).replace("\n", " ")
-        name = author["name"] + "#" + str(author["discriminator"])
-        prefix = "[M]" if author["mod"] else "[R]"
-        out += truncate(f"`{prefix} {name}:` {content}", max=75) + "\n"
-
-    return out or "No Messages"
 
 
 def is_image_url(url: str) -> bool:
@@ -204,24 +175,32 @@ def cleanup_code(content: str) -> str:
     return content.strip("` \n")
 
 
-TOPIC_REGEX = re.compile(r"\bUser ID:\s*(\d{17,21})\b", flags=re.IGNORECASE)
-
-
-def match_user_id(text: str) -> int:
+def match_user_id(bot, text: str, match_bot_id: bool = True) -> int:
     """
     Matches a user ID in the format of "User ID: 12345".
 
     Parameters
     ----------
+    bot : commands.Bot
+        The current Discord Bot instance
     text : str
         The text of the user ID.
-
+    match_bot_id : Bool
+        Whether to match bot ID too.
+        Defaults True.
     Returns
     -------
     int
         The user ID if found. Otherwise, -1.
     """
-    match = TOPIC_REGEX.search(text)
+    if match_bot_id:
+        match = re.search(
+            r"\bUser ID:\s*(\d{17,21})\s+Bot ID: " + str(bot.user.id) + r"\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    else:
+        match = re.search(r"\bUser ID:\s*(\d{17,21})\b", text, flags=re.IGNORECASE)
     if match is not None:
         return int(match.group(1))
     return -1
